@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-🦅 ZerAds ML CAPTCHA Solver API - Render Deployment
-Model: flower_model.pkl
+🦅 ZerAds ML CAPTCHA Solver API - Full Base64 Mode
+Question: Base64, Choices: Base64
 """
 
 import os
@@ -9,15 +9,11 @@ import pickle
 import base64
 import numpy as np
 import cv2
-import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from io import BytesIO
-from PIL import Image
 import sys
 import logging
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -44,9 +40,6 @@ def load_model():
             scaler = data['scaler']
         logger.info("✅ Model loaded successfully!")
         return True
-    except FileNotFoundError:
-        logger.error(f"❌ Model file not found: {MODEL_PATH}")
-        return False
     except Exception as e:
         logger.error(f"❌ Failed to load model: {e}")
         return False
@@ -55,12 +48,8 @@ def load_model():
 # FEATURE EXTRACTION
 # ============================================================
 def extract_features(img):
-    """Extract features from image for ML model"""
     try:
-        # Resize to 64x64
         img = cv2.resize(img, (64, 64))
-        
-        # HSV histograms
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         
         h_hist = cv2.calcHist([hsv], [0], None, [180], [0, 180])
@@ -71,7 +60,6 @@ def extract_features(img):
         s_hist = cv2.normalize(s_hist, s_hist).flatten()
         v_hist = cv2.normalize(v_hist, v_hist).flatten()
         
-        # SIFT features
         sift = cv2.SIFT_create()
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         kp, des = sift.detectAndCompute(gray, None)
@@ -83,7 +71,6 @@ def extract_features(img):
             sift_mean = np.zeros(128)
             sift_std = np.zeros(128)
         
-        # Combine all features
         features = np.concatenate([h_hist, s_hist, v_hist, sift_mean, sift_std])
         return features
         
@@ -92,19 +79,15 @@ def extract_features(img):
         return None
 
 # ============================================================
-# PREDICT FLOWER
+# PREDICT
 # ============================================================
 def predict_flower(img):
-    """Predict flower ID from image"""
     try:
         features = extract_features(img)
         if features is None:
             return None, None
         
-        # Scale features
         features_scaled = scaler.transform([features])
-        
-        # Predict
         pred = model.predict(features_scaled)[0]
         confidence = model.predict_proba(features_scaled)[0][pred]
         
@@ -115,43 +98,43 @@ def predict_flower(img):
         return None, None
 
 # ============================================================
-# DOWNLOAD IMAGE FROM URL
+# DECODE BASE64 IMAGE
 # ============================================================
-def download_image(url):
-    """Download image from URL and return OpenCV image"""
+def decode_base64_image(b64_string):
+    """Decode base64 string to OpenCV image"""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        }
-        resp = requests.get(url, headers=headers, timeout=15)
+        # Remove data:image/jpeg;base64, prefix if present
+        if ',' in b64_string:
+            b64_string = b64_string.split(',')[1]
         
-        if resp.status_code == 200:
-            nparr = np.frombuffer(resp.content, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if img is not None:
-                return img
-        logger.warning(f"Failed to download: {url} - Status: {resp.status_code}")
-        return None
+        img_bytes = base64.b64decode(b64_string)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            logger.error(f"❌ Failed to decode image")
+            return None
             
+        return img
+        
     except Exception as e:
-        logger.error(f"Download error: {e}")
+        logger.error(f"❌ Base64 decode error: {e}")
         return None
 
 # ============================================================
-# API ENDPOINT - /zerd
+# API ENDPOINT - /zerd (Full Base64)
 # ============================================================
 @app.route('/zerd', methods=['POST'])
 def solve_captcha():
     """
-    Solve flower CAPTCHA
+    Solve flower CAPTCHA - Full Base64 Mode
     
     Request:
     {
-        "question": "base64_image_string",
+        "question": "iVBORw0KGgoAAAANSUhEUgAA...",  # Base64
         "choices": [
-            "https://zerads.com/images/CaptchaPTC/1.jpg",
-            "https://zerads.com/images/CaptchaPTC/2.jpg",
+            "iVBORw0KGgoAAAANSUhEUgAA...",  # Base64
+            "iVBORw0KGgoAAAANSUhEUgAA...",  # Base64
             ...
         ]
     }
@@ -161,11 +144,11 @@ def solve_captcha():
         "success": true,
         "answer": 3,
         "choice_url": "https://zerads.com/images/CaptchaPTC/3.jpg",
-        "confidence": 87.3
+        "confidence": 87.3,
+        "question_id": 3
     }
     """
     try:
-        # Get JSON data
         data = request.get_json()
         
         if not data:
@@ -174,46 +157,35 @@ def solve_captcha():
                 "error": "No JSON data provided"
             }), 400
         
-        # Get question image
-        question_base64 = data.get('question')
-        if not question_base64:
+        # Get question (Base64)
+        question_b64 = data.get('question')
+        if not question_b64:
             return jsonify({
                 "success": False,
                 "error": "Question image required"
             }), 400
         
-        # Get choices
-        choices = data.get('choices', [])
-        if not choices or len(choices) < 5:
+        # Get choices (List of Base64)
+        choices_b64 = data.get('choices', [])
+        if not choices_b64 or len(choices_b64) < 5:
             return jsonify({
                 "success": False,
                 "error": "At least 5 choices required"
             }), 400
         
-        # Decode question image
-        try:
-            # Remove data:image/jpeg;base64, prefix if present
-            if ',' in question_base64:
-                question_base64 = question_base64.split(',')[1]
-            
-            img_bytes = base64.b64decode(question_base64)
-            nparr = np.frombuffer(img_bytes, np.uint8)
-            question_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            if question_img is None:
-                return jsonify({
-                    "success": False,
-                    "error": "Failed to decode question image"
-                }), 400
-                
-        except Exception as e:
+        # Decode question
+        logger.info("📥 Decoding question image...")
+        question_img = decode_base64_image(question_b64)
+        
+        if question_img is None:
             return jsonify({
                 "success": False,
-                "error": f"Invalid image: {str(e)}"
+                "error": "Failed to decode question image"
             }), 400
         
-        # Predict question flower ID
-        logger.info("🤖 Predicting question...")
+        logger.info("✅ Question decoded successfully")
+        
+        # Predict question
         question_id, question_conf = predict_flower(question_img)
         
         if question_id is None:
@@ -224,38 +196,37 @@ def solve_captcha():
         
         logger.info(f"📊 Question ID: {question_id} (Confidence: {question_conf*100:.1f}%)")
         
-        # Download and predict each choice
+        # Process each choice
         choice_predictions = []
         
-        for idx, url in enumerate(choices):
-            logger.info(f"📥 Downloading choice {idx+1}: {url}")
-            img = download_image(url)
+        for idx, choice_b64 in enumerate(choices_b64):
+            logger.info(f"📥 Decoding choice {idx+1}...")
             
-            if img is None:
+            choice_img = decode_base64_image(choice_b64)
+            
+            if choice_img is None:
                 return jsonify({
                     "success": False,
-                    "error": f"Failed to download choice {idx+1}"
+                    "error": f"Failed to decode choice {idx+1}"
                 }), 400
             
-            pred_id, conf = predict_flower(img)
+            pred_id, conf = predict_flower(choice_img)
             choice_predictions.append({
                 "index": idx,
-                "url": url,
                 "predicted_id": pred_id,
                 "confidence": conf
             })
+            
             logger.info(f"   Choice {idx+1}: ID {pred_id} (Confidence: {conf*100:.1f}%)")
         
         # Find matching choice
         answer_idx = None
-        answer_url = None
         answer_conf = 0
         
         for pred in choice_predictions:
             if pred['predicted_id'] == question_id:
                 if answer_idx is None or pred['confidence'] > answer_conf:
                     answer_idx = pred['index']
-                    answer_url = pred['url']
                     answer_conf = pred['confidence']
         
         # If no exact match, use closest ID
@@ -267,7 +238,6 @@ def solve_captcha():
                     if diff < best_diff:
                         best_diff = diff
                         answer_idx = pred['index']
-                        answer_url = pred['url']
                         answer_conf = pred['confidence']
             
             if answer_idx is not None:
@@ -279,18 +249,18 @@ def solve_captcha():
                 "error": "No matching choice found"
             }), 500
         
-        # Response
+        # Response (choice_url optional - client can use their own)
         response = {
             "success": True,
             "answer": answer_idx + 1,
-            "choice_url": answer_url,
+            "choice_url": f"https://zerads.com/images/CaptchaPTC/{question_id}.jpg",
             "confidence": round(answer_conf * 100, 1),
             "question_id": question_id,
             "question_confidence": round(question_conf * 100, 1),
             "message": f"✅ Matched with choice #{answer_idx + 1}"
         }
         
-        logger.info(f"✅ Answer: #{answer_idx + 1} → {answer_url}")
+        logger.info(f"✅ Answer: #{answer_idx + 1} → {response['choice_url']}")
         logger.info(f"   Confidence: {answer_conf*100:.1f}%")
         
         return jsonify(response), 200
@@ -302,6 +272,7 @@ def solve_captcha():
             "error": str(e)
         }), 500
 
+
 # ============================================================
 # HEALTH CHECK
 # ============================================================
@@ -311,7 +282,8 @@ def health():
         "status": "healthy",
         "model_loaded": model is not None,
         "service": "ZerAds ML CAPTCHA Solver",
-        "version": "1.0.0"
+        "version": "2.0.0",
+        "mode": "Full Base64"
     }), 200
 
 
@@ -319,7 +291,8 @@ def health():
 def health_check():
     return jsonify({
         "status": "ok",
-        "model": "loaded" if model else "not loaded"
+        "model": "loaded" if model else "not loaded",
+        "mode": "base64_only"
     }), 200
 
 
@@ -327,7 +300,6 @@ def health_check():
 # MAIN
 # ============================================================
 if __name__ == "__main__":
-    # Load model
     if not load_model():
         logger.error("❌ Exiting...")
         sys.exit(1)

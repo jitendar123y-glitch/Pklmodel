@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ZerAds ML API - Flower Recognition Service
-Render deployment ready
+ZerAds ML API - Full Base64 Mode
+All images (target + choices) sent as base64
 """
 
 from flask import Flask, jsonify, request
@@ -9,7 +9,6 @@ import os
 import pickle
 import cv2
 import numpy as np
-import requests
 import base64
 import logging
 
@@ -48,18 +47,6 @@ def base64_to_cv2(base64_string):
     except Exception as e:
         logger.error(f"Base64 decode error: {e}")
         return None
-
-def url_to_cv2(url):
-    """Download image from URL"""
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            nparr = np.frombuffer(resp.content, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            return img
-    except Exception as e:
-        logger.error(f"URL fetch error: {e}")
-    return None
 
 def recognize_flower(img):
     """ML model prediction"""
@@ -100,13 +87,42 @@ def recognize_flower(img):
         logger.error(f"Recognition error: {e}")
         return None
 
+def get_visual_similarity(target_img, choice_img):
+    """Calculate visual similarity between two images"""
+    try:
+        target_resized = cv2.resize(target_img, (64, 64))
+        choice_resized = cv2.resize(choice_img, (64, 64))
+        
+        target_hsv = cv2.cvtColor(target_resized, cv2.COLOR_BGR2HSV)
+        choice_hsv = cv2.cvtColor(choice_resized, cv2.COLOR_BGR2HSV)
+        
+        h_hist_target = cv2.calcHist([target_hsv], [0], None, [180], [0, 180])
+        h_hist_choice = cv2.calcHist([choice_hsv], [0], None, [180], [0, 180])
+        
+        h_hist_target = cv2.normalize(h_hist_target, h_hist_target).flatten()
+        h_hist_choice = cv2.normalize(h_hist_choice, h_hist_choice).flatten()
+        
+        hist_dist = cv2.compareHist(
+            h_hist_target.reshape(-1, 1),
+            h_hist_choice.reshape(-1, 1),
+            cv2.HISTCMP_BHATTACHARYYA
+        )
+        similarity_score = 1.0 - hist_dist
+        similarity_score = max(0, min(1, similarity_score))
+        
+        return float(similarity_score)
+    except Exception as e:
+        logger.error(f"Similarity calc error: {e}")
+        return 0.0
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         'status': '🚀 ZerAds ML API',
+        'mode': 'full_base64',
         'model': 'loaded' if MODEL else 'not loaded',
         'endpoints': {
-            'POST /predict': 'Predict flower from target image + choices',
+            'POST /predict': 'Predict flower from target + choices (all base64)',
             'GET /health': 'Health check'
         }
     })
@@ -115,98 +131,87 @@ def home():
 def health():
     return jsonify({
         'status': 'ok',
-        'model': 'ready' if MODEL else 'not ready'
+        'mode': 'full_base64',
+        'model': 'loaded' if MODEL else 'not loaded'
     })
 
 @app.route('/predict', methods=['POST'])
 def predict():
     """
     Predict best choice for flower captcha
+    ALL IMAGES AS BASE64 (target + choices)
     
     Request:
     {
         "target_image": "base64_encoded_image",
         "choices": [
-            "https://zerads.com/images/CaptchaPTC/1.jpg",
-            "https://zerads.com/images/CaptchaPTC/2.jpg",
+            "base64_encoded_choice_1",
+            "base64_encoded_choice_2",
             ...
         ]
     }
     
     Response:
     {
+        "status": "success",
         "best_choice_index": 2,
         "predicted_flower_id": 5,
         "confidence": 0.987,
-        "choice_scores": [0.45, 0.87, 0.23, ...],
-        "status": "success"
+        "choice_scores": [0.45, 0.87, 0.23, ...]
     }
     """
     
     try:
         if MODEL is None or SCALER is None:
-            return jsonify({'error': 'Model not loaded'}), 500
+            return jsonify({'status': 'error', 'error': 'Model not loaded'}), 500
         
         data = request.json
         
+        if not data:
+            return jsonify({'status': 'error', 'error': 'No JSON data received'}), 400
+        
         if 'target_image' not in data:
-            return jsonify({'error': 'Missing target_image'}), 400
+            return jsonify({'status': 'error', 'error': 'Missing target_image'}), 400
         
         if 'choices' not in data or not isinstance(data['choices'], list):
-            return jsonify({'error': 'Missing choices (list of URLs)'}), 400
+            return jsonify({'status': 'error', 'error': 'Missing choices (list of base64 images)'}), 400
         
         if len(data['choices']) == 0:
-            return jsonify({'error': 'No choices provided'}), 400
+            return jsonify({'status': 'error', 'error': 'No choices provided'}), 400
         
-        # Parse target image
-        logger.info(f"Processing target image...")
+        # Decode target image
+        logger.info("Processing target image...")
         target_img = base64_to_cv2(data['target_image'])
         
         if target_img is None:
-            return jsonify({'error': 'Failed to decode target_image'}), 400
+            return jsonify({'status': 'error', 'error': 'Failed to decode target_image'}), 400
         
-        # Recognize
+        logger.info(f"Target image shape: {target_img.shape}")
+        
+        # ML Recognition on target
         result = recognize_flower(target_img)
         
         if result is None:
-            return jsonify({'error': 'ML recognition failed'}), 400
+            return jsonify({'status': 'error', 'error': 'ML recognition failed'}), 400
         
         predicted_flower_id, confidence = result
+        logger.info(f"Predicted flower: #{predicted_flower_id} ({confidence:.1%})")
         
-        # Analyze choices
+        # Decode and analyze each choice (base64)
+        logger.info(f"Processing {len(data['choices'])} choice images...")
         choice_scores = []
         
-        for idx, choice_url in enumerate(data['choices']):
-            choice_img = url_to_cv2(choice_url)
+        for idx, choice_b64 in enumerate(data['choices']):
+            choice_img = base64_to_cv2(choice_b64)
             
             if choice_img is None:
-                choice_scores.append(0)
+                logger.warning(f"Choice {idx}: Failed to decode")
+                choice_scores.append(0.0)
                 continue
             
-            # Histogram similarity
-            try:
-                choice_img_resized = cv2.resize(choice_img, (64, 64))
-                choice_hsv = cv2.cvtColor(choice_img_resized, cv2.COLOR_BGR2HSV)
-                
-                target_hsv = cv2.cvtColor(cv2.resize(target_img, (64, 64)), cv2.COLOR_BGR2HSV)
-                
-                h_hist_target = cv2.calcHist([target_hsv], [0], None, [180], [0, 180])
-                h_hist_choice = cv2.calcHist([choice_hsv], [0], None, [180], [0, 180])
-                
-                h_hist_target = cv2.normalize(h_hist_target, h_hist_target).flatten()
-                h_hist_choice = cv2.normalize(h_hist_choice, h_hist_choice).flatten()
-                
-                hist_dist = cv2.compareHist(
-                    h_hist_target.reshape(-1, 1),
-                    h_hist_choice.reshape(-1, 1),
-                    cv2.HISTCMP_BHATTACHARYYA
-                )
-                similarity_score = 1.0 - hist_dist
-                similarity_score = max(0, min(1, similarity_score))
-                
-                choice_scores.append(float(similarity_score))
-            except:
-                choice_scores.append(0)
+            similarity = get_visual_similarity(target_img, choice_img)
+            choice_scores.append(similarity)
+            logger.info(f"Choice {idx}: similarity={similarity:.3f}")
         
         best_choice_idx = int(np.argmax(choice_scores))
         
@@ -218,18 +223,17 @@ def predict():
             'choice_scores': choice_scores
         }
         
-        logger.info(f"Prediction: Flower #{predicted_flower_id}, Best choice: #{best_choice_idx}")
+        logger.info(f"✅ Best choice: #{best_choice_idx}")
         return jsonify(response)
     
     except Exception as e:
-        logger.error(f"Error: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error in predict: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Load model on startup
     load_model()
-    
-    # Run server
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"🚀 Server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)

@@ -2,6 +2,7 @@
 """
 ZerAds ML API - Full Base64 Mode
 All images (target + choices) sent as base64
+Auto unzip flower_model.tar.gz if exists
 """
 
 from flask import Flask, jsonify, request
@@ -11,6 +12,8 @@ import cv2
 import numpy as np
 import base64
 import logging
+import tarfile
+import sys
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -19,12 +22,60 @@ logger = logging.getLogger(__name__)
 # Load ML model at startup
 MODEL = None
 SCALER = None
+MODEL_FILE = 'flower_model.pkl'
+MODEL_TAR = 'flower_model.tar.gz'
+
+# ============================================================
+# AUTO EXTRACT MODEL
+# ============================================================
+
+def extract_model():
+    """Extract model from tar.gz if needed"""
+    try:
+        # Check if .pkl already exists
+        if os.path.exists(MODEL_FILE):
+            logger.info(f"✅ Model file already exists: {MODEL_FILE}")
+            return True
+        
+        # Check if .tar.gz exists
+        if os.path.exists(MODEL_TAR):
+            logger.info(f"📦 Extracting {MODEL_TAR}...")
+            
+            with tarfile.open(MODEL_TAR, 'r:gz') as tar:
+                # Extract all files
+                tar.extractall()
+                logger.info(f"✅ Extracted: {tar.getnames()}")
+            
+            # Check if .pkl extracted successfully
+            if os.path.exists(MODEL_FILE):
+                logger.info(f"✅ Model extracted successfully: {MODEL_FILE}")
+                return True
+            else:
+                logger.error(f"❌ Model file not found after extraction: {MODEL_FILE}")
+                return False
+        else:
+            logger.error(f"❌ Neither {MODEL_FILE} nor {MODEL_TAR} found!")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Extraction failed: {e}")
+        return False
+
+# ============================================================
+# LOAD MODEL
+# ============================================================
 
 def load_model():
     global MODEL, SCALER
+    
+    # First extract model if needed
+    if not extract_model():
+        logger.error("❌ Failed to extract model")
+        return False
+    
     try:
         logger.info("📚 Loading ML model...")
-        with open('flower_model.pkl', 'rb') as f:
+        with open(MODEL_FILE, 'rb') as f:
             data = pickle.load(f)
             MODEL = data['model']
             SCALER = data['scaler']
@@ -33,6 +84,10 @@ def load_model():
     except Exception as e:
         logger.error(f"❌ Model loading failed: {e}")
         return False
+
+# ============================================================
+# IMAGE PROCESSING FUNCTIONS
+# ============================================================
 
 def base64_to_cv2(base64_string):
     """Convert base64 to OpenCV image"""
@@ -115,12 +170,18 @@ def get_visual_similarity(target_img, choice_img):
         logger.error(f"Similarity calc error: {e}")
         return 0.0
 
+# ============================================================
+# ROUTES
+# ============================================================
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         'status': '🚀 ZerAds ML API',
         'mode': 'full_base64',
         'model': 'loaded' if MODEL else 'not loaded',
+        'model_file': MODEL_FILE,
+        'extracted': os.path.exists(MODEL_FILE),
         'endpoints': {
             'POST /predict': 'Predict flower from target + choices (all base64)',
             'GET /health': 'Health check'
@@ -132,7 +193,8 @@ def health():
     return jsonify({
         'status': 'ok',
         'mode': 'full_base64',
-        'model': 'loaded' if MODEL else 'not loaded'
+        'model': 'loaded' if MODEL else 'not loaded',
+        'model_exists': os.path.exists(MODEL_FILE)
     })
 
 @app.route('/predict', methods=['POST'])
@@ -232,8 +294,16 @@ def predict():
         traceback.print_exc()
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
+# ============================================================
+# MAIN
+# ============================================================
+
 if __name__ == '__main__':
-    load_model()
+    # Load model (auto extract if needed)
+    if not load_model():
+        logger.error("❌ Failed to load model. Exiting...")
+        sys.exit(1)
+    
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"🚀 Server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
